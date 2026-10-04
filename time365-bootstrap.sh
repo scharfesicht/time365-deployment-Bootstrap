@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-BOOTSTRAP_VERSION="2026.10.04-rc3"
+BOOTSTRAP_VERSION="2026.10.04-rc4"
 
 DEFAULT_INSTALLER_REPO="https://github.com/scharfesicht/time365-deployment-installer.git"
 DEFAULT_INSTALLER_REF="main"
 
 PROFILE=""
+MODE="install"
+
 INSTALLER_REPO="${TIME365_INSTALLER_REPO:-$DEFAULT_INSTALLER_REPO}"
 INSTALLER_REF="${TIME365_INSTALLER_REF:-$DEFAULT_INSTALLER_REF}"
 
@@ -19,15 +21,24 @@ usage() {
 Time365 Generic Bootstrap
 
 Usage:
-  bootstrap.sh <profile> [options]
+  bootstrap.sh <profile> [mode] [options]
+
+Modes:
+  install    Fresh installation. Default.
+  upgrade    Upgrade an existing RC2-managed deployment.
+  verify     Run deployment verification only.
+  rollback   Roll back the RC2-managed deployment.
 
 Examples:
   bootstrap.sh dawami
-  bootstrap.sh moh
-  bootstrap.sh customer-x
+  bootstrap.sh dawami install
+  bootstrap.sh dawami upgrade
+  bootstrap.sh dawami verify
+  bootstrap.sh dawami rollback
 
 Options:
   --profile NAME          Profile name. Alternative to the first positional argument.
+  --mode MODE             install|upgrade|verify|rollback
   --installer-repo URL   Override the private generic installer repository.
   --ref REF              Installer branch/tag/commit. Default: main
   --keep-installer       Keep temporary installer checkout after success.
@@ -39,15 +50,6 @@ Default private installer:
 Environment overrides:
   TIME365_INSTALLER_REPO
   TIME365_INSTALLER_REF
-
-For a private HTTPS repository, Git may request your GitHub username and
-Personal Access Token on the terminal.
-
-For production servers, the installer repository can instead be accessed
-through SSH/deploy keys, for example:
-
-  TIME365_INSTALLER_REPO=git@github.com:scharfesicht/time365-deployment-installer.git \
-    ./bootstrap.sh dawami
 USAGE
 }
 
@@ -77,8 +79,15 @@ cleanup() {
 
 trap cleanup EXIT
 
+# Positional profile.
 if [[ $# -gt 0 && "$1" != -* ]]; then
     PROFILE="$1"
+    shift
+fi
+
+# Optional positional mode.
+if [[ $# -gt 0 && "$1" != -* ]]; then
+    MODE="$1"
     shift
 fi
 
@@ -87,6 +96,11 @@ while [[ $# -gt 0 ]]; do
         --profile)
             [[ $# -ge 2 ]] || die "--profile requires a value"
             PROFILE="$2"
+            shift 2
+            ;;
+        --mode)
+            [[ $# -ge 2 ]] || die "--mode requires a value"
+            MODE="$2"
             shift 2
             ;;
         --installer-repo)
@@ -113,8 +127,16 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-[[ -n "$PROFILE" ]] || die "Profile is required. Example: bootstrap.sh dawami"
+[[ -n "$PROFILE" ]] || die "Profile is required. Example: bootstrap.sh dawami install"
 [[ "$PROFILE" =~ ^[A-Za-z0-9._-]+$ ]] || die "Invalid profile name: $PROFILE"
+
+case "$MODE" in
+    install|upgrade|verify|rollback)
+        ;;
+    *)
+        die "Invalid mode: $MODE. Expected install|upgrade|verify|rollback"
+        ;;
+esac
 
 if [[ -r /etc/os-release ]]; then
     # shellcheck disable=SC1091
@@ -150,6 +172,7 @@ log "Bootstrap version : $BOOTSTRAP_VERSION"
 log "Installer repo    : $INSTALLER_REPO"
 log "Installer ref     : $INSTALLER_REF"
 log "Profile           : $PROFILE"
+log "Mode              : $MODE"
 log "Temporary checkout: $WORK_DIR"
 
 clone_installer() {
@@ -177,6 +200,7 @@ clone_installer
 [[ -f "$WORK_DIR/profiles/$PROFILE.env" ]] \
     || die "Profile not found: profiles/$PROFILE.env"
 
+# Manual GitHub uploads may not preserve executable bits.
 find "$WORK_DIR" -type f -name '*.sh' -exec chmod +x {} +
 
 if [[ -x "$WORK_DIR/scripts/validate-repo.sh" ]]; then
@@ -188,13 +212,13 @@ if [[ -x "$WORK_DIR/scripts/validate-repo.sh" ]]; then
     )
 fi
 
-log "Launching Time365 installer for profile: $PROFILE"
+log "Launching Time365 installer: profile=$PROFILE mode=$MODE"
 
 (
     cd "$WORK_DIR"
-    $SUDO ./install.sh "$PROFILE"
+    $SUDO ./install.sh "$PROFILE" "$MODE"
 )
 
 INSTALL_SUCCEEDED="true"
 
-log "Installation completed successfully."
+log "Operation completed successfully: profile=$PROFILE mode=$MODE"

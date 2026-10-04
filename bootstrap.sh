@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-BOOTSTRAP_VERSION="2026.10.04-rc4"
+BOOTSTRAP_VERSION="2026.10.05-rc5"
 
 DEFAULT_INSTALLER_REPO="https://github.com/scharfesicht/time365-deployment-installer.git"
 DEFAULT_INSTALLER_REF="main"
@@ -13,6 +13,7 @@ INSTALLER_REPO="${TIME365_INSTALLER_REPO:-$DEFAULT_INSTALLER_REPO}"
 INSTALLER_REF="${TIME365_INSTALLER_REF:-$DEFAULT_INSTALLER_REF}"
 
 KEEP_INSTALLER="false"
+INTERACTIVE="false"
 WORK_DIR=""
 INSTALL_SUCCEEDED="false"
 
@@ -33,6 +34,7 @@ Examples:
   bootstrap.sh dawami
   bootstrap.sh dawami install
   bootstrap.sh dawami upgrade
+  bootstrap.sh dawami upgrade --interactive
   bootstrap.sh dawami verify
   bootstrap.sh dawami rollback
 
@@ -42,6 +44,7 @@ Options:
   --installer-repo URL   Override the private generic installer repository.
   --ref REF              Installer branch/tag/commit. Default: main
   --keep-installer       Keep temporary installer checkout after success.
+  --interactive          Re-prompt deployment values during upgrade.
   -h, --help             Show this help.
 
 Default private installer:
@@ -115,6 +118,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --keep-installer)
             KEEP_INSTALLER="true"
+            shift
+            ;;
+        --interactive)
+            INTERACTIVE="true"
             shift
             ;;
         -h|--help)
@@ -216,7 +223,11 @@ log "Launching Time365 installer: profile=$PROFILE mode=$MODE"
 
 (
     cd "$WORK_DIR"
-    $SUDO ./install.sh "$PROFILE" "$MODE"
+    INSTALL_ARGS=("$PROFILE" "$MODE")
+    if [[ "$INTERACTIVE" == "true" ]]; then
+        INSTALL_ARGS+=(--interactive)
+    fi
+    $SUDO ./install.sh "${INSTALL_ARGS[@]}"
 )
 
 INSTALL_SUCCEEDED="true"

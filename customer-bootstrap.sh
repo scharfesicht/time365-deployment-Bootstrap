@@ -168,6 +168,13 @@ PROFILE="$WORKDIR/customer/profiles/${CUSTOMER}.env"
     || die 'Installer does not include RC3 customer isolation support'
 
 python3 "$INSTALLER/scripts/security_scan.py" "$INSTALLER" --generic
+# TIME365_RC3_V22_RELEASE_DEPENDENCY_GATE
+# Reject partial private installer releases during --preflight-only as well as install/upgrade.
+[[ -f "$INSTALLER/scripts/validate-release-dependencies.py" ]] \
+    || die 'Incomplete private installer release: runtime dependency validator missing'
+python3 "$INSTALLER/scripts/validate-release-dependencies.py" "$INSTALLER" \
+    || die 'Incomplete private installer release: runtime dependency validation failed'
+
 python3 "$INSTALLER/scripts/security_scan.py" "$WORKDIR/customer" --customer
 bash -n "$PROFILE" || die 'Customer profile shell syntax failed'
 profile_customer="$(sed -n 's/^CUSTOMER_ID=//p' "$PROFILE" | head -n1)"

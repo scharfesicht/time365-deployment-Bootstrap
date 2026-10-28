@@ -21,7 +21,7 @@ cat <<'HELP'
 Time365 RC3 customer-isolated bootstrap (two-token mode)
 
 Usage:
-  sudo ./bootstrap.sh --customer dawami [--mode install|upgrade|verify|rollback]
+  sudo ./bootstrap.sh --customer dawami [--mode install|upgrade|reinstall|verify|rollback]
     [--customer-repo https://github.com/scharfesicht/time365-customer-dawami.git]
     [--installer-ref TAG] [--customer-ref TAG]
     [--github-token-file /root/time365/github-readonly.token]
@@ -67,7 +67,7 @@ done
 if [[ -z "$CUSTOMER_REPO" ]]; then
     CUSTOMER_REPO="https://github.com/scharfesicht/time365-customer-${CUSTOMER}.git"
 fi
-[[ "$MODE" == install || "$MODE" == upgrade || "$MODE" == verify || "$MODE" == rollback ]] || die 'Invalid --mode'
+[[ "$MODE" == install || "$MODE" == upgrade || "$MODE" == reinstall || "$MODE" == verify || "$MODE" == rollback ]] || die 'Invalid --mode'
 [[ "$INSTALLER_REF" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] || die 'Invalid --installer-ref'
 [[ "$CUSTOMER_REF" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] || die 'Invalid --customer-ref'
 [[ $(id -u) -eq 0 ]] || die 'Run via sudo/root to protect deployment credentials'
@@ -181,7 +181,7 @@ profile_customer="$(sed -n 's/^CUSTOMER_ID=//p' "$PROFILE" | head -n1)"
 [[ "$profile_customer" == "$CUSTOMER" ]] || die 'CUSTOMER_ID in customer profile must match --customer'
 find "$INSTALLER" -type f -name '*.sh' -exec chmod 700 {} +
 
-if [[ "$MODE" == install || "$MODE" == upgrade ]]; then
+if [[ "$MODE" == install || "$MODE" == upgrade || "$MODE" == reinstall ]]; then
     if [[ -n "$SECRETS_FILE" ]]; then
         check_token_file "$SECRETS_FILE" 'Customer secrets file'
     fi
@@ -254,7 +254,7 @@ if [[ ! -e "$CERT_DIR/fullchain.pem" ]]; then
     cat "$WORKDIR/customer/tls/STAR_nacd_ac_ae.crt" "$WORKDIR/customer/tls/ca-chain.crt" > "$WORKDIR/customer-fullchain.pem"
     install -m 644 -o root -g root "$WORKDIR/customer-fullchain.pem" "$CERT_DIR/fullchain.pem"
 fi
-if [[ -z "$SECRETS_FILE" && ( "$MODE" == install || "$MODE" == upgrade ) ]]; then
+if [[ -z "$SECRETS_FILE" && ( "$MODE" == install || "$MODE" == upgrade || "$MODE" == reinstall ) ]]; then
     age --decrypt -i "$AGE_IDENTITY" -o "$WORKDIR/decrypted-secrets.env" "$BUNDLE/secrets.env.age" || die 'Cannot decrypt customer secrets'
     chmod 600 "$WORKDIR/decrypted-secrets.env"
     SECRETS_FILE="$WORKDIR/decrypted-secrets.env"
@@ -262,10 +262,30 @@ fi
 
 # Pass the resolved file to the generic installer after optional age decryption.
 # This covers both --secrets-file and encrypted customer bundles.
-if [[ "$MODE" == install || "$MODE" == upgrade ]]; then
+if [[ "$MODE" == install || "$MODE" == upgrade || "$MODE" == reinstall ]]; then
     [[ -n "$SECRETS_FILE" && -f "$SECRETS_FILE" && ! -L "$SECRETS_FILE" ]] \
         || die 'Missing resolved customer secrets file'
     export TIME365_INPUT_SECRETS_FILE="$SECRETS_FILE"
+fi
+
+# TIME365_RC3_V24_SAFE_REINSTALL
+# Reinstall is an explicit destructive workflow; never translate it to install
+# until the managed identity, scoped Docker ownership, complete secret inputs
+# and operator confirmation have all been verified.
+if [[ "$MODE" == reinstall ]]; then
+    [[ "$PREFLIGHT_ONLY" != true ]] || die 'Use --preflight-only separately from reinstall'
+    [[ -z "$SECRETS_FILE" ]] && die 'Cannot reinstall without decrypted customer secrets'
+    [[ -f "$INSTALLER/scripts/reinstall-customer.py" && ! -L "$INSTALLER/scripts/reinstall-customer.py" ]] \
+        || die 'Private installer release missing reinstall safety helper'
+    python3 "$INSTALLER/scripts/reinstall-customer.py" \
+        --customer "$CUSTOMER" --profile "$PROFILE" \
+        --source-secrets "$SECRETS_FILE" \
+        --output-secrets "$WORKDIR/reinstall-merged-secrets.env" \
+        || die 'Reinstall refused; existing installation has not been approved for replacement'
+    SECRETS_FILE="$WORKDIR/reinstall-merged-secrets.env"
+    export TIME365_INPUT_SECRETS_FILE="$SECRETS_FILE"
+    MODE=install
+    log 'Reinstall cleanup completed; beginning new installation with verified credentials'
 fi
 
 # Docker login (in the installer) uses this temporary isolated credentials directory.
@@ -276,6 +296,6 @@ export DOCKER_CONFIG TIME365_EPHEMERAL_DOCKER_CONFIG=1
 
 log "Deploying customer '$CUSTOMER' from two scoped repositories."
 args=("$PROFILE" "$MODE")
-if [[ "$INTERACTIVE" == true && ( "$MODE" == install || "$MODE" == upgrade ) ]]; then args+=(--interactive); fi
+if [[ "$INTERACTIVE" == true && ( "$MODE" == install || "$MODE" == upgrade || "$MODE" == reinstall ) ]]; then args+=(--interactive); fi
 "$INSTALLER/install.sh" "${args[@]}"
 log 'Completed customer-isolated deployment.'

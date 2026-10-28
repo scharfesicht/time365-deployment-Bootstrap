@@ -140,6 +140,25 @@ export TIME365_GITHUB_BOOTSTRAP_TOKEN
 
 clone_repository "$INSTALLER_REPO" "$INSTALLER_REF" "$WORKDIR/installer" installer
 clone_repository "$CUSTOMER_REPO" "$CUSTOMER_REF" "$WORKDIR/customer" customer
+# TIME365_RC3_AUTO_KEY_VAULT_V19
+# The same scoped GitHub PAT retrieves a separate, PRIVATE age identity vault.
+# This is two-token operator mode, but NOT independent cryptographic isolation:
+# a compromised PAT grants access to both encrypted payloads and the age key.
+[[ -z "${AGE_IDENTITY:-}" ]] || die '--age-identity override is unsupported in automatic vault mode'
+KEY_VAULT_REPO='https://github.com/scharfesicht/time365-customer-key-vault.git'
+KEY_VAULT_REF='main'
+clone_repository "$KEY_VAULT_REPO" "$KEY_VAULT_REF" "$WORKDIR/key-vault" key-vault
+AGE_IDENTITY="$WORKDIR/key-vault/customers/${CUSTOMER}/identity.agekey"
+[[ -f "$AGE_IDENTITY" && ! -L "$AGE_IDENTITY" ]] || die 'Key vault missing customer identity'
+[[ $(stat -c %u "$AGE_IDENTITY") == 0 ]] || die 'Key vault identity must be root-owned'
+chmod 600 "$AGE_IDENTITY"
+check_token_file "$AGE_IDENTITY" 'Customer age identity'
+# Refuse malformed or accidentally substituted key material; never print contents.
+if ! grep -q '^AGE-SECRET-KEY-1[A-Z0-9]*$' "$AGE_IDENTITY"; then
+    die 'Customer vault identity does not have an age secret-key line'
+fi
+log 'Customer age identity retrieved from private key vault (temporary only)'
+
 unset TIME365_GITHUB_BOOTSTRAP_TOKEN
 
 INSTALLER="$WORKDIR/installer"
@@ -165,7 +184,7 @@ fi
 # Never call the installer, install certificates, modify Docker or create persistent files.
 if [[ "$PREFLIGHT_ONLY" == true ]]; then
     [[ -z "$SECRETS_FILE" ]] || die '--secrets-file is unsupported with --preflight-only'
-    AGE_IDENTITY="${AGE_IDENTITY:-/etc/time365/keys/${CUSTOMER}.agekey}"
+    AGE_IDENTITY="${AGE_IDENTITY:?Missing automatically retrieved age identity}"
     [[ "$AGE_IDENTITY" == /* ]] || die 'age identity must be an absolute path'
     check_token_file "$AGE_IDENTITY" 'Customer age identity'
     command -v age >/dev/null 2>&1 || die 'age is required for encrypted customer material'
@@ -206,7 +225,7 @@ fi
 
 # TIME365_RC3_CUSTOMER_ENCRYPTED_BUNDLE_V5
 # Only selected customer's repository has been cloned. Decrypt under root-only temp dir.
-AGE_IDENTITY="${AGE_IDENTITY:-/etc/time365/keys/${CUSTOMER}.agekey}"
+AGE_IDENTITY="${AGE_IDENTITY:?Missing automatically retrieved age identity}"
 [[ "$AGE_IDENTITY" == /* ]] || die 'age identity must be an absolute path'
 check_token_file "$AGE_IDENTITY" 'Customer age identity'
 command -v age >/dev/null || die 'age command is required for encrypted customer material'

@@ -21,7 +21,7 @@ cat <<'HELP'
 Time365 RC3 customer-isolated bootstrap (two-token mode)
 
 Usage:
-  sudo ./bootstrap.sh --customer dawami [--mode install|upgrade|reinstall|verify|rollback]
+  sudo ./bootstrap.sh --customer dawami [--mode install|upgrade|reinstall|verify|rollback|db-install|db-verify|db-backup|db-restore]
     [--customer-repo https://github.com/scharfesicht/time365-customer-dawami.git]
     [--installer-ref TAG] [--customer-ref TAG]
     [--github-token-file /root/time365/github-readonly.token]
@@ -67,7 +67,7 @@ done
 if [[ -z "$CUSTOMER_REPO" ]]; then
     CUSTOMER_REPO="https://github.com/scharfesicht/time365-customer-${CUSTOMER}.git"
 fi
-[[ "$MODE" == install || "$MODE" == upgrade || "$MODE" == reinstall || "$MODE" == verify || "$MODE" == rollback ]] || die 'Invalid --mode'
+[[ "$MODE" == install || "$MODE" == upgrade || "$MODE" == reinstall || "$MODE" == verify || "$MODE" == rollback || "$MODE" == db-install || "$MODE" == db-verify || "$MODE" == db-backup || "$MODE" == db-restore ]] || die 'Invalid --mode'
 [[ "$INSTALLER_REF" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] || die 'Invalid --installer-ref'
 [[ "$CUSTOMER_REF" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] || die 'Invalid --customer-ref'
 [[ $(id -u) -eq 0 ]] || die 'Run via sudo/root to protect deployment credentials'
@@ -181,7 +181,7 @@ profile_customer="$(sed -n 's/^CUSTOMER_ID=//p' "$PROFILE" | head -n1)"
 [[ "$profile_customer" == "$CUSTOMER" ]] || die 'CUSTOMER_ID in customer profile must match --customer'
 find "$INSTALLER" -type f -name '*.sh' -exec chmod 700 {} +
 
-if [[ "$MODE" == install || "$MODE" == upgrade || "$MODE" == reinstall ]]; then
+if [[ "$MODE" == install || "$MODE" == upgrade || "$MODE" == reinstall || "$MODE" == db-install ]]; then
     if [[ -n "$SECRETS_FILE" ]]; then
         check_token_file "$SECRETS_FILE" 'Customer secrets file'
     fi
@@ -254,7 +254,7 @@ if [[ ! -e "$CERT_DIR/fullchain.pem" ]]; then
     cat "$WORKDIR/customer/tls/STAR_nacd_ac_ae.crt" "$WORKDIR/customer/tls/ca-chain.crt" > "$WORKDIR/customer-fullchain.pem"
     install -m 644 -o root -g root "$WORKDIR/customer-fullchain.pem" "$CERT_DIR/fullchain.pem"
 fi
-if [[ -z "$SECRETS_FILE" && ( "$MODE" == install || "$MODE" == upgrade || "$MODE" == reinstall ) ]]; then
+if [[ -z "$SECRETS_FILE" && ( "$MODE" == install || "$MODE" == upgrade || "$MODE" == reinstall || "$MODE" == db-install ) ]]; then
     age --decrypt -i "$AGE_IDENTITY" -o "$WORKDIR/decrypted-secrets.env" "$BUNDLE/secrets.env.age" || die 'Cannot decrypt customer secrets'
     chmod 600 "$WORKDIR/decrypted-secrets.env"
     SECRETS_FILE="$WORKDIR/decrypted-secrets.env"
@@ -262,7 +262,7 @@ fi
 
 # Pass the resolved file to the generic installer after optional age decryption.
 # This covers both --secrets-file and encrypted customer bundles.
-if [[ "$MODE" == install || "$MODE" == upgrade || "$MODE" == reinstall ]]; then
+if [[ "$MODE" == install || "$MODE" == upgrade || "$MODE" == reinstall || "$MODE" == db-install ]]; then
     [[ -n "$SECRETS_FILE" && -f "$SECRETS_FILE" && ! -L "$SECRETS_FILE" ]] \
         || die 'Missing resolved customer secrets file'
     export TIME365_INPUT_SECRETS_FILE="$SECRETS_FILE"
@@ -294,6 +294,12 @@ DOCKER_CONFIG="$WORKDIR/docker-config"
 mkdir -m 700 "$DOCKER_CONFIG"
 export DOCKER_CONFIG TIME365_EPHEMERAL_DOCKER_CONFIG=1
 
+# TIME365_RC3_V32_STANDALONE_DB_BASELINE_CONTEXT
+# Ephemeral private customer checkout and key-vault identity are passed as
+# root-only environment paths; never copy keys or plaintext DB dumps to Git.
+# Database installer only uses these paths when DB_RESTORE_AUTO=true.
+export TIME365_CUSTOMER_ROOT="$WORKDIR/customer"
+export TIME365_AGE_IDENTITY="$AGE_IDENTITY"
 log "Deploying customer '$CUSTOMER' from two scoped repositories."
 args=("$PROFILE" "$MODE")
 if [[ "$INTERACTIVE" == true && ( "$MODE" == install || "$MODE" == upgrade || "$MODE" == reinstall ) ]]; then args+=(--interactive); fi

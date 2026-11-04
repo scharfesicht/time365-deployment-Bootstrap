@@ -67,7 +67,14 @@ done
 if [[ -z "$CUSTOMER_REPO" ]]; then
     CUSTOMER_REPO="https://github.com/scharfesicht/time365-customer-${CUSTOMER}.git"
 fi
-[[ "$MODE" == install || "$MODE" == upgrade || "$MODE" == reinstall || "$MODE" == verify || "$MODE" == rollback || "$MODE" == db-install || "$MODE" == db-verify || "$MODE" == db-backup || "$MODE" == db-restore ]] || die 'Invalid --mode'
+# TIME365_RC3_MOH_TEST_V4_BOOTSTRAP_DISPATCH
+case "$MODE" in
+    install|upgrade|reinstall|verify|rollback|db-install|db-verify|db-backup|db-restore) ;;
+    moh-prune|moh-start|moh-stop)
+        [[ "$CUSTOMER" == 'moh-test' ]] || die 'MOH-only --mode cannot run for another customer'
+        ;;
+    *) die 'Invalid --mode' ;;
+esac
 [[ "$INSTALLER_REF" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] || die 'Invalid --installer-ref'
 [[ "$CUSTOMER_REF" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] || die 'Invalid --customer-ref'
 [[ $(id -u) -eq 0 ]] || die 'Run via sudo/root to protect deployment credentials'
@@ -179,9 +186,72 @@ python3 "$INSTALLER/scripts/security_scan.py" "$WORKDIR/customer" --customer
 bash -n "$PROFILE" || die 'Customer profile shell syntax failed'
 profile_customer="$(sed -n 's/^CUSTOMER_ID=//p' "$PROFILE" | head -n1)"
 [[ "$profile_customer" == "$CUSTOMER" ]] || die 'CUSTOMER_ID in customer profile must match --customer'
+# TIME365_RC3_MOH_V5_1_CERT_AND_MODE_CONTRACT
+# Preserve existing Dawami certificate naming. MOH gets an independent name.
+TIME365_TLS_CERT_FILE='STAR_nacd_ac_ae.crt'
+if [[ "$CUSTOMER" == 'moh-test' ]]; then
+    TIME365_TLS_CERT_FILE='server.crt'
+    case "$MODE" in
+        install|upgrade|verify|db-install|db-restore|db-verify|moh-prune|moh-start|moh-stop) ;;
+        *) die "Unsupported MOH mode: $MODE. MOH rollback/reinstall/db-backup not implemented" ;;
+    esac
+fi
+# Generic RC3 TLS source: package (default) or existing server files.
+# Read only the explicit profile value; do not shell-evaluate customer configuration.
+TLS_SOURCE="$(sed -n 's/^TLS_SOURCE=//p' "$PROFILE")"
+[[ -n "$TLS_SOURCE" ]] || TLS_SOURCE=package
+case "$TLS_SOURCE" in package|server) ;; *) die 'TLS_SOURCE must be package or server' ;; esac
+export TLS_SOURCE
+
+# Server mode never copies, replaces or decrypts a customer-owned TLS private key.
+# Certificate must be a PEM fullchain already maintained on the server.
+# A resolved directory supports Let's Encrypt live/ -> archive/ symlinks safely.
+validate_external_tls() {
+    local raw_dir cert_name key_name chain_name cert key chain cert_pub key_pub
+    raw_dir="$(sed -n 's/^TLS_BUNDLE_DIR=//p' "$PROFILE")"
+    cert_name="$(sed -n 's/^TLS_CERT_FILE=//p' "$PROFILE")"
+    key_name="$(sed -n 's/^TLS_KEY_FILE=//p' "$PROFILE")"
+    chain_name="$(sed -n 's/^TLS_CHAIN_FILE=//p' "$PROFILE")"
+    [[ "$raw_dir" == /* && -d "$raw_dir" ]] || die 'Server TLS_BUNDLE_DIR must be an existing absolute directory'
+    [[ "$raw_dir" != *$'\n'* && "$raw_dir" != *$'\r'* && "$raw_dir" != *:* ]] || die 'Invalid TLS_BUNDLE_DIR'
+    for name in "$cert_name" "$key_name"; do
+        [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ && "$name" != '..' ]] || die 'TLS filenames must be simple basenames'
+    done
+    if [[ -n "$chain_name" ]]; then
+        [[ "$chain_name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ && "$chain_name" != '..' ]] || die 'Invalid TLS_CHAIN_FILE'
+    fi
+    TLS_SERVER_DIR="$(realpath -e -- "$raw_dir")" || die 'Cannot resolve TLS server directory'
+    [[ "$TLS_SERVER_DIR" == /* && "$TLS_SERVER_DIR" != '/' ]] || die 'Unsafe TLS server directory'
+    cert="$TLS_SERVER_DIR/$cert_name"; key="$TLS_SERVER_DIR/$key_name"
+    for item in "$cert" "$key"; do
+        [[ -f "$item" && -r "$item" ]] || die 'Server TLS file unavailable or unreadable'
+        [[ "$(realpath -e -- "$item")" == "$TLS_SERVER_DIR/"* ]] || die 'Server TLS file symlink escapes configured directory'
+    done
+    if [[ -n "$chain_name" ]]; then
+        chain="$TLS_SERVER_DIR/$chain_name"
+        [[ -f "$chain" && -r "$chain" ]] || die 'Server TLS chain missing'
+        [[ "$(realpath -e -- "$chain")" == "$TLS_SERVER_DIR/"* ]] || die 'Server TLS chain escapes configured directory'
+    fi
+    openssl x509 -in "$cert" -noout -checkend 604800 >/dev/null 2>&1 || die 'Server TLS certificate expired or expires within seven days'
+    openssl pkey -in "$key" -pubout > "$WORKDIR/server-tls-key.pub" 2>/dev/null || die 'Server TLS private key invalid'
+    openssl x509 -in "$cert" -pubkey -noout > "$WORKDIR/server-tls-cert.pub" 2>/dev/null || die 'Server TLS certificate invalid'
+    cmp -s "$WORKDIR/server-tls-key.pub" "$WORKDIR/server-tls-cert.pub" || die 'Server TLS certificate/key mismatch'
+    # Nginx ssl_certificate needs a fullchain PEM, not just a leaf certificate.
+    # When a separate chain is specified, require the cert file to include intermediates.
+    if [[ -n "$chain_name" ]]; then
+        [[ $(grep -c -- 'BEGIN CERTIFICATE' "$cert") -ge 2 ]] || die 'TLS_CERT_FILE must be a fullchain when TLS_CHAIN_FILE is supplied'
+    fi
+    export TLS_SERVER_DIR
+    log 'PASS: server-managed TLS validated; no certificate files changed'
+}
+if [[ "$TLS_SOURCE" == server ]]; then
+    command -v openssl >/dev/null 2>&1 || die 'OpenSSL required for server-managed TLS'
+    validate_external_tls
+fi
+
 find "$INSTALLER" -type f -name '*.sh' -exec chmod 700 {} +
 
-if [[ "$MODE" == install || "$MODE" == upgrade || "$MODE" == reinstall || "$MODE" == db-install ]]; then
+if [[ "$MODE" == install || "$MODE" == upgrade || "$MODE" == reinstall || "$MODE" == db-install || "$CUSTOMER" == "moh-test" ]]; then
     if [[ -n "$SECRETS_FILE" ]]; then
         check_token_file "$SECRETS_FILE" 'Customer secrets file'
     fi
@@ -197,27 +267,32 @@ if [[ "$PREFLIGHT_ONLY" == true ]]; then
     command -v age >/dev/null 2>&1 || die 'age is required for encrypted customer material'
     command -v openssl >/dev/null 2>&1 || die 'openssl is required to validate customer TLS material'
     preflight_bundle="$WORKDIR/customer/encrypted"
-    preflight_cert="$WORKDIR/customer/tls/STAR_nacd_ac_ae.crt"
+    preflight_cert="$WORKDIR/customer/tls/${TIME365_TLS_CERT_FILE}"
     preflight_chain="$WORKDIR/customer/tls/ca-chain.crt"
-    for preflight_file in "$preflight_bundle/secrets.env.age" "$preflight_bundle/tls-private-key.age" "$preflight_cert" "$preflight_chain"; do
+    preflight_required=("$preflight_bundle/secrets.env.age")
+    if [[ "$TLS_SOURCE" == package ]]; then
+        preflight_required+=("$preflight_bundle/tls-private-key.age" "$preflight_cert" "$preflight_chain")
+    fi
+    for preflight_file in "${preflight_required[@]}"; do
         [[ -f "$preflight_file" && ! -L "$preflight_file" ]] || die 'Missing/unsafe customer encrypted bundle or public TLS file'
     done
     # Never emit decrypted file contents or key material to stdout/stderr.
     if ! age --decrypt -i "$AGE_IDENTITY" -o "$WORKDIR/preflight-secrets.env" "$preflight_bundle/secrets.env.age" >/dev/null 2>&1; then
         die 'Customer secrets decryption failed'
     fi
-    if ! age --decrypt -i "$AGE_IDENTITY" -o "$WORKDIR/preflight-private-key" "$preflight_bundle/tls-private-key.age" >/dev/null 2>&1; then
-        die 'Customer TLS key decryption failed'
+    [[ -s "$WORKDIR/preflight-secrets.env" ]] || die 'Decrypted secrets bundle is empty'
+    chmod 600 "$WORKDIR/preflight-secrets.env"
+    if [[ "$TLS_SOURCE" == package ]]; then
+        if ! age --decrypt -i "$AGE_IDENTITY" -o "$WORKDIR/preflight-private-key" "$preflight_bundle/tls-private-key.age" >/dev/null 2>&1; then
+            die 'Customer TLS key decryption failed'
+        fi
+        chmod 600 "$WORKDIR/preflight-private-key"
+        [[ -s "$WORKDIR/preflight-private-key" ]] || die 'Decrypted TLS private key is empty'
+        openssl pkey -in "$WORKDIR/preflight-private-key" -pubout -out "$WORKDIR/preflight-key.pub" 2>/dev/null || die 'Decrypted TLS private key is invalid'
+        openssl x509 -in "$preflight_cert" -pubkey -noout > "$WORKDIR/preflight-cert.pub" 2>/dev/null || die 'Customer TLS certificate invalid'
+        cmp -s "$WORKDIR/preflight-key.pub" "$WORKDIR/preflight-cert.pub" || die 'Customer TLS key mismatch'
     fi
-    chmod 600 "$WORKDIR/preflight-secrets.env" "$WORKDIR/preflight-private-key"
-    [[ -s "$WORKDIR/preflight-secrets.env" && -s "$WORKDIR/preflight-private-key" ]] || die 'Decrypted bundle is empty'
-    openssl pkey -in "$WORKDIR/preflight-private-key" -pubout -out "$WORKDIR/preflight-key.pub" 2>/dev/null \
-        || die 'Decrypted TLS private key is invalid'
-    openssl x509 -in "$preflight_cert" -pubkey -noout > "$WORKDIR/preflight-cert.pub" 2>/dev/null \
-        || die 'Customer TLS certificate is invalid'
-    cmp -s "$WORKDIR/preflight-key.pub" "$WORKDIR/preflight-cert.pub" \
-        || die 'Customer TLS private key does not match certificate'
-    log 'PASS: private repository checkout, security scans, customer profile, age secrets and TLS key/certificate match'
+    log 'PASS: private repository checkout, security scans, age secrets and selected TLS source validated'
     if [[ -d /opt/time365/"$CUSTOMER" ]]; then
         log "WARNING: /opt/time365/$CUSTOMER already exists; do not run install on this host"
     fi
@@ -237,13 +312,14 @@ AGE_IDENTITY="${AGE_IDENTITY:?Missing automatically retrieved age identity}"
 check_token_file "$AGE_IDENTITY" 'Customer age identity'
 command -v age >/dev/null || die 'age command is required for encrypted customer material'
 BUNDLE="$WORKDIR/customer/encrypted"
-[[ -f "$BUNDLE/tls-private-key.age" && -f "$BUNDLE/secrets.env.age" ]] || die 'Missing encrypted customer bundle'
-[[ ! -L "$BUNDLE/tls-private-key.age" && ! -L "$BUNDLE/secrets.env.age" ]] || die 'Encrypted bundle cannot contain symlinks'
+[[ -f "$BUNDLE/secrets.env.age" && ! -L "$BUNDLE/secrets.env.age" ]] || die 'Missing encrypted customer secrets'
+if [[ "$TLS_SOURCE" == package ]]; then
+[[ -f "$BUNDLE/tls-private-key.age" && ! -L "$BUNDLE/tls-private-key.age" ]] || die 'Missing encrypted customer TLS key'
 CERT_DIR="/etc/time365/customers/${CUSTOMER}/tls"
 [[ ! -L "$CERT_DIR" ]] || die 'Refusing symlink TLS destination'
 install -d -m 700 -o root -g root "$CERT_DIR"
-[[ -f "$WORKDIR/customer/tls/STAR_nacd_ac_ae.crt" && -f "$WORKDIR/customer/tls/ca-chain.crt" ]] || die 'Missing public TLS chain'
-[[ ! -L "$WORKDIR/customer/tls/STAR_nacd_ac_ae.crt" && ! -L "$WORKDIR/customer/tls/ca-chain.crt" ]] || die 'Public TLS files cannot be symlinks'
+[[ -f "$WORKDIR/customer/tls/${TIME365_TLS_CERT_FILE}" && -f "$WORKDIR/customer/tls/ca-chain.crt" ]] || die 'Missing public TLS chain'
+[[ ! -L "$WORKDIR/customer/tls/${TIME365_TLS_CERT_FILE}" && ! -L "$WORKDIR/customer/tls/ca-chain.crt" ]] || die 'Public TLS files cannot be symlinks'
 # Do not replace working TLS material on an upgrade: explicit rotation is separate.
 if [[ ! -e "$CERT_DIR/privkey.pem" ]]; then
     age --decrypt -i "$AGE_IDENTITY" -o "$WORKDIR/decrypted-private-key" "$BUNDLE/tls-private-key.age" || die 'Cannot decrypt customer TLS private key'
@@ -251,10 +327,11 @@ if [[ ! -e "$CERT_DIR/privkey.pem" ]]; then
     install -m 600 -o root -g root "$WORKDIR/decrypted-private-key" "$CERT_DIR/privkey.pem"
 fi
 if [[ ! -e "$CERT_DIR/fullchain.pem" ]]; then
-    cat "$WORKDIR/customer/tls/STAR_nacd_ac_ae.crt" "$WORKDIR/customer/tls/ca-chain.crt" > "$WORKDIR/customer-fullchain.pem"
+    cat "$WORKDIR/customer/tls/${TIME365_TLS_CERT_FILE}" "$WORKDIR/customer/tls/ca-chain.crt" > "$WORKDIR/customer-fullchain.pem"
     install -m 644 -o root -g root "$WORKDIR/customer-fullchain.pem" "$CERT_DIR/fullchain.pem"
 fi
-if [[ -z "$SECRETS_FILE" && ( "$MODE" == install || "$MODE" == upgrade || "$MODE" == reinstall || "$MODE" == db-install ) ]]; then
+fi # TLS_SOURCE=package; external TLS remains entirely customer-managed
+if [[ -z "$SECRETS_FILE" && ( "$MODE" == install || "$MODE" == upgrade || "$MODE" == reinstall || "$MODE" == db-install || "$CUSTOMER" == "moh-test" ) ]]; then
     age --decrypt -i "$AGE_IDENTITY" -o "$WORKDIR/decrypted-secrets.env" "$BUNDLE/secrets.env.age" || die 'Cannot decrypt customer secrets'
     chmod 600 "$WORKDIR/decrypted-secrets.env"
     SECRETS_FILE="$WORKDIR/decrypted-secrets.env"
@@ -262,7 +339,7 @@ fi
 
 # Pass the resolved file to the generic installer after optional age decryption.
 # This covers both --secrets-file and encrypted customer bundles.
-if [[ "$MODE" == install || "$MODE" == upgrade || "$MODE" == reinstall || "$MODE" == db-install ]]; then
+if [[ "$MODE" == install || "$MODE" == upgrade || "$MODE" == reinstall || "$MODE" == db-install || "$CUSTOMER" == "moh-test" ]]; then
     [[ -n "$SECRETS_FILE" && -f "$SECRETS_FILE" && ! -L "$SECRETS_FILE" ]] \
         || die 'Missing resolved customer secrets file'
     export TIME365_INPUT_SECRETS_FILE="$SECRETS_FILE"
@@ -303,5 +380,11 @@ export TIME365_AGE_IDENTITY="$AGE_IDENTITY"
 log "Deploying customer '$CUSTOMER' from two scoped repositories."
 args=("$PROFILE" "$MODE")
 if [[ "$INTERACTIVE" == true && ( "$MODE" == install || "$MODE" == upgrade || "$MODE" == reinstall ) ]]; then args+=(--interactive); fi
-"$INSTALLER/install.sh" "${args[@]}"
+if [[ "$CUSTOMER" == 'moh-test' ]]; then
+    [[ -f "$INSTALLER/addons/moh-test/rc3-entrypoint.py" && ! -L "$INSTALLER/addons/moh-test/rc3-entrypoint.py" ]] \
+        || die 'Private installer missing MOH RC3 entrypoint; release incomplete'
+    python3 "$INSTALLER/addons/moh-test/rc3-entrypoint.py" --mode "$MODE" --profile "$PROFILE"
+else
+    "$INSTALLER/install.sh" "${args[@]}"
+fi
 log 'Completed customer-isolated deployment.'

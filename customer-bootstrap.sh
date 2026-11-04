@@ -434,7 +434,10 @@ if [[ "$INTERACTIVE" == true && ( "$MODE" == install || "$MODE" == upgrade || "$
 if [[ "$CUSTOMER" == 'moh-test' ]]; then
     [[ -f "$INSTALLER/addons/moh-test/rc3-entrypoint.py" && ! -L "$INSTALLER/addons/moh-test/rc3-entrypoint.py" ]] \
         || die 'Private installer missing MOH RC3 entrypoint; release incomplete'
-    python3 "$INSTALLER/addons/moh-test/rc3-entrypoint.py" --mode "$MODE" --profile "$PROFILE"
+    moh_args=(--mode "$MODE" --profile "$PROFILE")
+    # TIME365_MOH_GUIDED_INSTALL_V1
+    if [[ "$INTERACTIVE" == true && ( "$MODE" == install || "$MODE" == upgrade ) ]]; then moh_args+=(--interactive); fi
+    python3 "$INSTALLER/addons/moh-test/rc3-entrypoint.py" "${moh_args[@]}"
 else
     "$INSTALLER/install.sh" "${args[@]}"
 fi

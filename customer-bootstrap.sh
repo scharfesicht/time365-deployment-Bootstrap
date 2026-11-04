@@ -377,6 +377,57 @@ export DOCKER_CONFIG TIME365_EPHEMERAL_DOCKER_CONFIG=1
 # Database installer only uses these paths when DB_RESTORE_AUTO=true.
 export TIME365_CUSTOMER_ROOT="$WORKDIR/customer"
 export TIME365_AGE_IDENTITY="$AGE_IDENTITY"
+# TIME365_RC3_AUTO_DOCKER_MOH_DISPATCH_V1
+# The regular installer already calls ensure_docker(); MOH's direct Python
+# entrypoint bypasses it. Provision missing packages here for MOH only.
+# Preflight exits above this point and never installs Docker.
+ensure_moh_docker_prerequisites() {
+    [[ "$CUSTOMER" == 'moh-test' ]] || return 0
+    case "$MODE" in
+        install|upgrade|db-install|db-restore|moh-start) ;;
+        *) return 0 ;;
+    esac
+    if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+        docker info >/dev/null 2>&1 || die 'Docker CLI exists, but daemon is unavailable; check systemctl status docker'
+        log 'Docker Engine and Compose already available; skipping installation'
+        return 0
+    fi
+    [[ -r /etc/os-release ]] || die 'Cannot determine OS for Docker provisioning'
+    # shellcheck disable=SC1091
+    . /etc/os-release
+    [[ "${ID:-}" == 'ubuntu' ]] || die 'Automatic Docker installation supports Ubuntu only'
+    command -v apt-get >/dev/null 2>&1 || die 'apt-get is required for Docker provisioning'
+    local packages=(ca-certificates curl openssl)
+    if ! command -v docker >/dev/null 2>&1; then
+        packages+=(docker.io)
+    fi
+    if ! docker compose version >/dev/null 2>&1; then
+        packages+=(docker-compose-v2)
+    fi
+    log "Installing missing Docker prerequisites using Ubuntu packages: ${packages[*]}"
+    DEBIAN_FRONTEND=noninteractive apt-get update || die 'apt-get update failed'
+    if ! DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${packages[@]}"; then
+        # Some supported Ubuntu package mirrors use docker-compose-plugin.
+        if [[ " ${packages[*]} " != *' docker-compose-v2 '* ]]; then
+            die 'Docker prerequisites installation failed'
+        fi
+        local fallback=() item
+        for item in "${packages[@]}"; do
+            [[ "$item" == docker-compose-v2 ]] && item=docker-compose-plugin
+            fallback+=("$item")
+        done
+        packages=("${fallback[@]}")
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${packages[@]}" \
+            || die 'Docker/Compose installation failed'
+    fi
+    command -v systemctl >/dev/null 2>&1 || die 'systemctl not available'
+    systemctl enable --now docker || die 'Failed to enable/start Docker service'
+    command -v docker >/dev/null 2>&1 || die 'Docker CLI missing after installation'
+    docker compose version >/dev/null 2>&1 || die 'Docker Compose V2 missing after installation'
+    docker info >/dev/null 2>&1 || die 'Docker daemon unavailable after installation'
+    log 'Docker Engine and Compose are ready'
+}
+ensure_moh_docker_prerequisites
 log "Deploying customer '$CUSTOMER' from two scoped repositories."
 args=("$PROFILE" "$MODE")
 if [[ "$INTERACTIVE" == true && ( "$MODE" == install || "$MODE" == upgrade || "$MODE" == reinstall ) ]]; then args+=(--interactive); fi

@@ -8,6 +8,7 @@ INSTALLER_REF='main'
 CUSTOMER=''
 CUSTOMER_REPO=''
 CUSTOMER_REF='main'
+ENVIRONMENT='production'
 GITHUB_TOKEN_FILE=''
 MODE='install'
 INTERACTIVE=false
@@ -24,6 +25,7 @@ Usage:
   sudo ./bootstrap.sh --customer dawami [--mode install|upgrade|reinstall|verify|rollback|db-install|db-verify|db-backup|db-restore]
     [--customer-repo https://github.com/scharfesicht/time365-customer-dawami.git]
     [--installer-ref TAG] [--customer-ref TAG]
+    [--environment dev|production]  (default: production, preserves existing profile path)
     [--github-token-file /root/time365/github-readonly.token]
     [--secrets-file /root/time365/dawami/secrets.env] [--interactive]
 
@@ -53,6 +55,7 @@ while (($#)); do
         --installer-repo) (($# >= 2)) || die '--installer-repo requires a value'; INSTALLER_REPO="$2"; shift 2 ;;
         --installer-ref|--ref) (($# >= 2)) || die '--installer-ref requires a value'; INSTALLER_REF="$2"; shift 2 ;;
         --customer-ref) (($# >= 2)) || die '--customer-ref requires a value'; CUSTOMER_REF="$2"; shift 2 ;;
+        --environment) (($# >= 2)) || die '--environment requires a value'; ENVIRONMENT="$2"; shift 2 ;;
         --github-token-file) (($# >= 2)) || die '--github-token-file requires a path'; GITHUB_TOKEN_FILE="$2"; shift 2 ;;
         --age-identity) (($# >= 2)) || die '--age-identity requires a path'; AGE_IDENTITY="$2"; shift 2 ;;
         --secrets-file) (($# >= 2)) || die '--secrets-file requires a path'; SECRETS_FILE="$2"; shift 2 ;;
@@ -64,6 +67,11 @@ while (($#)); do
     esac
 done
 [[ "$CUSTOMER" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{1,47}$ ]] || die 'Invalid/missing --customer'
+# Explicit environment; do not silently fall back to another customer profile.
+case "$ENVIRONMENT" in dev|production) ;; *) die "Invalid --environment=$ENVIRONMENT (expected dev|production)" ;; esac
+if [[ "$ENVIRONMENT" == dev && "$CUSTOMER" != dawami ]]; then
+    die "Development profile is only provisioned for customer dawami; refusing cross-customer use"
+fi
 if [[ -z "$CUSTOMER_REPO" ]]; then
     CUSTOMER_REPO="https://github.com/scharfesicht/time365-customer-${CUSTOMER}.git"
 fi
@@ -169,8 +177,14 @@ log 'Customer age identity retrieved from private key vault (temporary only)'
 unset TIME365_GITHUB_BOOTSTRAP_TOKEN
 
 INSTALLER="$WORKDIR/installer"
-PROFILE="$WORKDIR/customer/profiles/${CUSTOMER}.env"
-[[ -f "$PROFILE" && ! -L "$PROFILE" ]] || die 'Customer repo must contain profiles/${CUSTOMER}.env'
+# TIME365_RC3_CUSTOMER_ENV_SELECTION_V1
+if [[ "$ENVIRONMENT" == dev ]]; then
+    PROFILE="$WORKDIR/customer/profiles/${CUSTOMER}.dev.env"
+else
+    PROFILE="$WORKDIR/customer/profiles/${CUSTOMER}.env"
+fi
+[[ -f "$PROFILE" && ! -L "$PROFILE" ]] || die "Selected customer environment profile missing or unsafe: ${CUSTOMER} (${ENVIRONMENT})"
+log "Selected customer profile: ${CUSTOMER} (${ENVIRONMENT})"
 [[ -f "$INSTALLER/install.sh" && -f "$INSTALLER/scripts/security_scan.py" ]] \
     || die 'Installer does not include RC3 customer isolation support'
 

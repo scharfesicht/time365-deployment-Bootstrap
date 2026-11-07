@@ -4,3 +4,6 @@
 *.age -text
 *.crt -text
 *.key -text
+# TIME365_RC3_UPGRADE_REPAIR_V2
+*.sh text eol=lf
+*.py text eol=lf

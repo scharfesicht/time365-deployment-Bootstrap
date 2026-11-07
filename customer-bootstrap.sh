@@ -25,7 +25,7 @@ Usage:
   sudo ./bootstrap.sh --customer dawami [--mode install|upgrade|reinstall|verify|rollback|db-install|db-verify|db-backup|db-restore]
     [--customer-repo https://github.com/scharfesicht/time365-customer-dawami.git]
     [--installer-ref TAG] [--customer-ref TAG]
-    [--environment dev|production]  (default: production, preserves existing profile path)
+    [--environment dev|production]  (default: production; Dawami upgrades select dawami.production.env)
     [--github-token-file /root/time365/github-readonly.token]
     [--secrets-file /root/time365/dawami/secrets.env] [--interactive]
 
@@ -109,6 +109,13 @@ ensure_bootstrap_dependencies() {
     done
 }
 ensure_bootstrap_dependencies
+
+# TIME365_RC3_UPGRADE_REPAIR_V2
+# Production uses the exact installer/customer commits qualified on development.
+if [[ "$CUSTOMER" == dawami && "$MODE" == upgrade && "$ENVIRONMENT" == production ]]; then
+    [[ "$INSTALLER_REF" =~ ^[0-9a-f]{40}$ && "$CUSTOMER_REF" =~ ^[0-9a-f]{40}$ ]] \
+        || die 'Production upgrade requires full --installer-ref and --customer-ref commit SHAs from the qualified release'
+fi
 [[ -z "$SECRETS_FILE" || "$SECRETS_FILE" == /* ]] || die '--secrets-file must be an absolute path'
 
 check_token_file() {
@@ -121,12 +128,20 @@ check_token_file() {
 
 # HTTPS authentication: never embed tokens in URLs, Git config or command-line arguments.
 clone_repository() {
-    local repo="$1" ref="$2" dest="$3" label="$4"
+    local repo="$1" ref="$2" dest="$3" label="$4" resolved
     [[ "$repo" =~ ^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\.git$ ]] \
-        || die "$label repo must be a plain https://github.com/ORG/REPO.git URL"
+        || die "$label repository URL is invalid"
+    git init -q "$dest"
+    git -C "$dest" remote add origin "$repo"
     GIT_TERMINAL_PROMPT=0 GIT_ASKPASS="$WORKDIR/git-askpass.sh" \
-        git -c credential.helper= -c "core.askPass=$WORKDIR/git-askpass.sh" \
-        clone --quiet --depth 1 --branch "$ref" -- "$repo" "$dest"
+        git -C "$dest" -c credential.helper= -c "core.askPass=$WORKDIR/git-askpass.sh" \
+        fetch --quiet --depth 1 origin "$ref" || die "$label fetch failed"
+    git -C "$dest" -c advice.detachedHead=false checkout --quiet --detach FETCH_HEAD
+    resolved="$(git -C "$dest" rev-parse HEAD)"
+    if [[ "$ref" =~ ^[0-9a-f]{40}$ && "$resolved" != "$ref" ]]; then
+        die "$label fetched commit does not match the requested immutable revision"
+    fi
+    log "$label resolved commit: $resolved"
 }
 
 WORKDIR="$(mktemp -d /tmp/time365-customer-bootstrap.XXXXXXXX)"
@@ -181,7 +196,11 @@ INSTALLER="$WORKDIR/installer"
 if [[ "$ENVIRONMENT" == dev ]]; then
     PROFILE="$WORKDIR/customer/profiles/${CUSTOMER}.dev.env"
 else
-    PROFILE="$WORKDIR/customer/profiles/${CUSTOMER}.env"
+    if [[ "$CUSTOMER" == dawami && "$MODE" == upgrade ]]; then
+        PROFILE="$WORKDIR/customer/profiles/${CUSTOMER}.production.env"
+    else
+        PROFILE="$WORKDIR/customer/profiles/${CUSTOMER}.env"
+    fi
 fi
 [[ -f "$PROFILE" && ! -L "$PROFILE" ]] || die "Selected customer environment profile missing or unsafe: ${CUSTOMER} (${ENVIRONMENT})"
 log "Selected customer profile: ${CUSTOMER} (${ENVIRONMENT})"
@@ -269,6 +288,22 @@ if [[ "$MODE" == install || "$MODE" == upgrade || "$MODE" == reinstall || "$MODE
     if [[ -n "$SECRETS_FILE" ]]; then
         check_token_file "$SECRETS_FILE" 'Customer secrets file'
     fi
+fi
+
+# Upgrades use the same real deployment preflight in check and apply modes.
+# This is BEFORE TLS installation, secret seeding, manifest creation or service changes.
+if [[ "$CUSTOMER" == dawami && "$MODE" == upgrade ]]; then
+    python3 "$INSTALLER/scripts/rc3-release-check.py" "$INSTALLER" \
+        || die 'Incomplete/untracked/modified guarded-upgrade release'
+    export TIME365_AGE_IDENTITY="$AGE_IDENTITY"
+    export TIME365_CUSTOMER_ROOT="$WORKDIR/customer"
+    export TIME365_RC3_ENVIRONMENT="$ENVIRONMENT"
+    TIME365_RC3_BOOTSTRAP_COMMIT="$(git -C "$(dirname "$0")" rev-parse HEAD 2>/dev/null || printf unknown)"
+    export TIME365_RC3_BOOTSTRAP_COMMIT
+    guarded_args=(--profile "$PROFILE" --environment "$ENVIRONMENT")
+    if [[ "$PREFLIGHT_ONLY" == true ]]; then guarded_args+=(--preflight-only); fi
+    python3 "$INSTALLER/scripts/rc3-upgrade.py" "${guarded_args[@]}"
+    exit $?
 fi
 
 # TIME365_RC3_PREFLIGHT_ONLY_V18

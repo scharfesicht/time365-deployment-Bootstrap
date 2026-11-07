@@ -6,7 +6,7 @@ set -Eeuo pipefail
 for _time365_arg in "$@"; do
     case "$_time365_arg" in
         --customer|--customer-repo)
-            exec "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/customer-bootstrap.sh" "$@"
+            exec bash "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/customer-bootstrap.sh" "$@"
             ;;
     esac
 done

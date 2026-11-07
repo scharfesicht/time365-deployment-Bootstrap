@@ -22,12 +22,12 @@ cat <<'HELP'
 Time365 RC3 customer-isolated bootstrap (two-token mode)
 
 Usage:
-  sudo ./bootstrap.sh --customer dawami [--mode install|upgrade|reinstall|verify|rollback|db-install|db-verify|db-backup|db-restore]
-    [--customer-repo https://github.com/scharfesicht/time365-customer-dawami.git]
+  sudo ./bootstrap.sh --customer CUSTOMER [--mode install|upgrade|reinstall|verify|rollback|db-install|db-verify|db-backup|db-restore]
+    [--customer-repo https://github.com/scharfesicht/time365-customer-CUSTOMER.git]
     [--installer-ref TAG] [--customer-ref TAG]
-    [--environment dev|production]  (default: production; Dawami upgrades select dawami.production.env)
+    [--environment NAME] (default: production; profiles select capabilities)
     [--github-token-file /root/time365/github-readonly.token]
-    [--secrets-file /root/time365/dawami/secrets.env] [--interactive]
+    [--secrets-file /root/time365/CUSTOMER/secrets.env] [--interactive]
 
 Auth:
   Public bootstrap: no token.
@@ -68,19 +68,14 @@ while (($#)); do
 done
 [[ "$CUSTOMER" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{1,47}$ ]] || die 'Invalid/missing --customer'
 # Explicit environment; do not silently fall back to another customer profile.
-case "$ENVIRONMENT" in dev|production) ;; *) die "Invalid --environment=$ENVIRONMENT (expected dev|production)" ;; esac
-if [[ "$ENVIRONMENT" == dev && "$CUSTOMER" != dawami ]]; then
-    die "Development profile is only provisioned for customer dawami; refusing cross-customer use"
-fi
+# TIME365_RC3_GENERIC_PROFILES_V3
+[[ "$ENVIRONMENT" =~ ^[a-z][a-z0-9-]{0,31}$ ]] || die 'Invalid environment name'
 if [[ -z "$CUSTOMER_REPO" ]]; then
     CUSTOMER_REPO="https://github.com/scharfesicht/time365-customer-${CUSTOMER}.git"
 fi
-# TIME365_RC3_MOH_TEST_V4_BOOTSTRAP_DISPATCH
+# Syntax only here; the selected profile validates driver/action capabilities.
 case "$MODE" in
-    install|upgrade|reinstall|verify|rollback|db-install|db-verify|db-backup|db-restore) ;;
-    moh-prune|moh-start|moh-stop)
-        [[ "$CUSTOMER" == 'moh-test' ]] || die 'MOH-only --mode cannot run for another customer'
-        ;;
+    install|upgrade|reinstall|verify|rollback|db-install|db-verify|db-backup|db-restore|monitor-install|monitor-upgrade|monitor-verify|monitor-rollback|app-start|app-stop|app-prune|moh-start|moh-stop|moh-prune) ;;
     *) die 'Invalid --mode' ;;
 esac
 [[ "$INSTALLER_REF" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] || die 'Invalid --installer-ref'
@@ -110,12 +105,8 @@ ensure_bootstrap_dependencies() {
 }
 ensure_bootstrap_dependencies
 
-# TIME365_RC3_UPGRADE_REPAIR_V2
-# Production uses the exact installer/customer commits qualified on development.
-if [[ "$CUSTOMER" == dawami && "$MODE" == upgrade && "$ENVIRONMENT" == production ]]; then
-    [[ "$INSTALLER_REF" =~ ^[0-9a-f]{40}$ && "$CUSTOMER_REF" =~ ^[0-9a-f]{40}$ ]] \
-        || die 'Production upgrade requires full --installer-ref and --customer-ref commit SHAs from the qualified release'
-fi
+# One shared installer release for all profiles. --installer-ref may select that
+# common qualified release; there is no customer-name-dependent version policy.
 [[ -z "$SECRETS_FILE" || "$SECRETS_FILE" == /* ]] || die '--secrets-file must be an absolute path'
 
 check_token_file() {
@@ -192,17 +183,14 @@ log 'Customer age identity retrieved from private key vault (temporary only)'
 unset TIME365_GITHUB_BOOTSTRAP_TOKEN
 
 INSTALLER="$WORKDIR/installer"
-# TIME365_RC3_CUSTOMER_ENV_SELECTION_V1
-if [[ "$ENVIRONMENT" == dev ]]; then
-    PROFILE="$WORKDIR/customer/profiles/${CUSTOMER}.dev.env"
-else
-    if [[ "$CUSTOMER" == dawami && "$MODE" == upgrade ]]; then
-        PROFILE="$WORKDIR/customer/profiles/${CUSTOMER}.production.env"
-    else
-        PROFILE="$WORKDIR/customer/profiles/${CUSTOMER}.env"
-    fi
-fi
-[[ -f "$PROFILE" && ! -L "$PROFILE" ]] || die "Selected customer environment profile missing or unsafe: ${CUSTOMER} (${ENVIRONMENT})"
+# A single profile resolver serves every customer and environment.
+[[ -f "$INSTALLER/scripts/rc3-profile-contract.py" && ! -L "$INSTALLER/scripts/rc3-profile-contract.py" ]] \
+    || die 'Installer lacks generic profile routing; publish the complete shared release first'
+python3 "$INSTALLER/scripts/rc3-release-check.py" "$INSTALLER" \
+    || die 'Shared installer release integrity check failed'
+PROFILE="$(python3 "$INSTALLER/scripts/rc3-profile-contract.py" select \
+    --customer-root "$WORKDIR/customer" --customer "$CUSTOMER" \
+    --environment "$ENVIRONMENT" --mode "$MODE")" || die 'Customer profile selection failed'
 log "Selected customer profile: ${CUSTOMER} (${ENVIRONMENT})"
 [[ -f "$INSTALLER/install.sh" && -f "$INSTALLER/scripts/security_scan.py" ]] \
     || die 'Installer does not include RC3 customer isolation support'
@@ -217,22 +205,24 @@ python3 "$INSTALLER/scripts/validate-release-dependencies.py" "$INSTALLER" \
 
 python3 "$INSTALLER/scripts/security_scan.py" "$WORKDIR/customer" --customer
 bash -n "$PROFILE" || die 'Customer profile shell syntax failed'
-profile_customer="$(sed -n 's/^CUSTOMER_ID=//p' "$PROFILE" | head -n1)"
-[[ "$profile_customer" == "$CUSTOMER" ]] || die 'CUSTOMER_ID in customer profile must match --customer'
-# TIME365_RC3_MOH_V5_1_CERT_AND_MODE_CONTRACT
-# Preserve existing Dawami certificate naming. MOH gets an independent name.
-TIME365_TLS_CERT_FILE='STAR_nacd_ac_ae.crt'
-if [[ "$CUSTOMER" == 'moh-test' ]]; then
-    TIME365_TLS_CERT_FILE='server.crt'
-    case "$MODE" in
-        install|upgrade|verify|db-install|db-restore|db-verify|moh-prune|moh-start|moh-stop) ;;
-        *) die "Unsupported MOH mode: $MODE. MOH rollback/reinstall/db-backup not implemented" ;;
+# Read only validated metadata; never source/eval customer data to choose code.
+python3 "$INSTALLER/scripts/rc3-profile-contract.py" contract \
+    --profile "$PROFILE" --customer "$CUSTOMER" --environment "$ENVIRONMENT" \
+    --mode "$MODE" --installer-root "$INSTALLER" > "$WORKDIR/profile-contract.env" \
+    || die 'Profile deployment contract rejected'
+while IFS='=' read -r key value; do
+    case "$key" in
+        RC3_DEPLOYMENT_DRIVER|RC3_UPGRADE_DRIVER|RC3_ADAPTER_ENTRYPOINT|RC3_RESOLVED_MODE|RC3_NEEDS_SECRETS|RC3_TLS_SOURCE|RC3_TLS_DIRECTORY|RC3_TLS_SERVER_CERT|RC3_TLS_SERVER_KEY|RC3_TLS_SERVER_CHAIN|TIME365_TLS_CERT_FILE|TIME365_TLS_CHAIN_FILE|TIME365_TLS_KEY_FILE)
+            printf -v "$key" '%s' "$value" ;;
+        *) die 'Unexpected profile contract output' ;;
     esac
-fi
+done < "$WORKDIR/profile-contract.env"
+MODE="$RC3_RESOLVED_MODE"
+export TIME365_RC3_ENVIRONMENT="$ENVIRONMENT"
+log "Profile driver: $RC3_DEPLOYMENT_DRIVER; upgrade lifecycle: $RC3_UPGRADE_DRIVER"
 # Generic RC3 TLS source: package (default) or existing server files.
 # Read only the explicit profile value; do not shell-evaluate customer configuration.
-TLS_SOURCE="$(sed -n 's/^TLS_SOURCE=//p' "$PROFILE")"
-[[ -n "$TLS_SOURCE" ]] || TLS_SOURCE=package
+TLS_SOURCE="$RC3_TLS_SOURCE"
 case "$TLS_SOURCE" in package|server) ;; *) die 'TLS_SOURCE must be package or server' ;; esac
 export TLS_SOURCE
 
@@ -241,10 +231,10 @@ export TLS_SOURCE
 # A resolved directory supports Let's Encrypt live/ -> archive/ symlinks safely.
 validate_external_tls() {
     local raw_dir cert_name key_name chain_name cert key chain cert_pub key_pub
-    raw_dir="$(sed -n 's/^TLS_BUNDLE_DIR=//p' "$PROFILE")"
-    cert_name="$(sed -n 's/^TLS_CERT_FILE=//p' "$PROFILE")"
-    key_name="$(sed -n 's/^TLS_KEY_FILE=//p' "$PROFILE")"
-    chain_name="$(sed -n 's/^TLS_CHAIN_FILE=//p' "$PROFILE")"
+    raw_dir="${RC3_TLS_DIRECTORY}"
+    cert_name="${RC3_TLS_SERVER_CERT}"
+    key_name="${RC3_TLS_SERVER_KEY}"
+    chain_name="${RC3_TLS_SERVER_CHAIN}"
     [[ "$raw_dir" == /* && -d "$raw_dir" ]] || die 'Server TLS_BUNDLE_DIR must be an existing absolute directory'
     [[ "$raw_dir" != *$'\n'* && "$raw_dir" != *$'\r'* && "$raw_dir" != *:* ]] || die 'Invalid TLS_BUNDLE_DIR'
     for name in "$cert_name" "$key_name"; do
@@ -284,7 +274,7 @@ fi
 
 find "$INSTALLER" -type f -name '*.sh' -exec chmod 700 {} +
 
-if [[ "$MODE" == install || "$MODE" == upgrade || "$MODE" == reinstall || "$MODE" == db-install || "$CUSTOMER" == "moh-test" ]]; then
+if [[ "$MODE" == install || "$MODE" == upgrade || "$MODE" == reinstall || "$MODE" == db-install || "$RC3_NEEDS_SECRETS" == true ]]; then
     if [[ -n "$SECRETS_FILE" ]]; then
         check_token_file "$SECRETS_FILE" 'Customer secrets file'
     fi
@@ -292,7 +282,7 @@ fi
 
 # Upgrades use the same real deployment preflight in check and apply modes.
 # This is BEFORE TLS installation, secret seeding, manifest creation or service changes.
-if [[ "$CUSTOMER" == dawami && "$MODE" == upgrade ]]; then
+if [[ "$RC3_UPGRADE_DRIVER" == guarded-laravel-v2 && "$MODE" == upgrade ]]; then
     python3 "$INSTALLER/scripts/rc3-release-check.py" "$INSTALLER" \
         || die 'Incomplete/untracked/modified guarded-upgrade release'
     export TIME365_AGE_IDENTITY="$AGE_IDENTITY"
@@ -317,10 +307,10 @@ if [[ "$PREFLIGHT_ONLY" == true ]]; then
     command -v openssl >/dev/null 2>&1 || die 'openssl is required to validate customer TLS material'
     preflight_bundle="$WORKDIR/customer/encrypted"
     preflight_cert="$WORKDIR/customer/tls/${TIME365_TLS_CERT_FILE}"
-    preflight_chain="$WORKDIR/customer/tls/ca-chain.crt"
+    preflight_chain="$WORKDIR/customer/tls/${TIME365_TLS_CHAIN_FILE}"
     preflight_required=("$preflight_bundle/secrets.env.age")
     if [[ "$TLS_SOURCE" == package ]]; then
-        preflight_required+=("$preflight_bundle/tls-private-key.age" "$preflight_cert" "$preflight_chain")
+        preflight_required+=("$preflight_bundle/${TIME365_TLS_KEY_FILE}" "$preflight_cert" "$preflight_chain")
     fi
     for preflight_file in "${preflight_required[@]}"; do
         [[ -f "$preflight_file" && ! -L "$preflight_file" ]] || die 'Missing/unsafe customer encrypted bundle or public TLS file'
@@ -332,7 +322,7 @@ if [[ "$PREFLIGHT_ONLY" == true ]]; then
     [[ -s "$WORKDIR/preflight-secrets.env" ]] || die 'Decrypted secrets bundle is empty'
     chmod 600 "$WORKDIR/preflight-secrets.env"
     if [[ "$TLS_SOURCE" == package ]]; then
-        if ! age --decrypt -i "$AGE_IDENTITY" -o "$WORKDIR/preflight-private-key" "$preflight_bundle/tls-private-key.age" >/dev/null 2>&1; then
+        if ! age --decrypt -i "$AGE_IDENTITY" -o "$WORKDIR/preflight-private-key" "$preflight_bundle/${TIME365_TLS_KEY_FILE}" >/dev/null 2>&1; then
             die 'Customer TLS key decryption failed'
         fi
         chmod 600 "$WORKDIR/preflight-private-key"
@@ -363,24 +353,24 @@ command -v age >/dev/null || die 'age command is required for encrypted customer
 BUNDLE="$WORKDIR/customer/encrypted"
 [[ -f "$BUNDLE/secrets.env.age" && ! -L "$BUNDLE/secrets.env.age" ]] || die 'Missing encrypted customer secrets'
 if [[ "$TLS_SOURCE" == package ]]; then
-[[ -f "$BUNDLE/tls-private-key.age" && ! -L "$BUNDLE/tls-private-key.age" ]] || die 'Missing encrypted customer TLS key'
+[[ -f "$BUNDLE/${TIME365_TLS_KEY_FILE}" && ! -L "$BUNDLE/${TIME365_TLS_KEY_FILE}" ]] || die 'Missing encrypted customer TLS key'
 CERT_DIR="/etc/time365/customers/${CUSTOMER}/tls"
 [[ ! -L "$CERT_DIR" ]] || die 'Refusing symlink TLS destination'
 install -d -m 700 -o root -g root "$CERT_DIR"
-[[ -f "$WORKDIR/customer/tls/${TIME365_TLS_CERT_FILE}" && -f "$WORKDIR/customer/tls/ca-chain.crt" ]] || die 'Missing public TLS chain'
-[[ ! -L "$WORKDIR/customer/tls/${TIME365_TLS_CERT_FILE}" && ! -L "$WORKDIR/customer/tls/ca-chain.crt" ]] || die 'Public TLS files cannot be symlinks'
+[[ -f "$WORKDIR/customer/tls/${TIME365_TLS_CERT_FILE}" && -f "$WORKDIR/customer/tls/${TIME365_TLS_CHAIN_FILE}" ]] || die 'Missing public TLS chain'
+[[ ! -L "$WORKDIR/customer/tls/${TIME365_TLS_CERT_FILE}" && ! -L "$WORKDIR/customer/tls/${TIME365_TLS_CHAIN_FILE}" ]] || die 'Public TLS files cannot be symlinks'
 # Do not replace working TLS material on an upgrade: explicit rotation is separate.
 if [[ ! -e "$CERT_DIR/privkey.pem" ]]; then
-    age --decrypt -i "$AGE_IDENTITY" -o "$WORKDIR/decrypted-private-key" "$BUNDLE/tls-private-key.age" || die 'Cannot decrypt customer TLS private key'
+    age --decrypt -i "$AGE_IDENTITY" -o "$WORKDIR/decrypted-private-key" "$BUNDLE/${TIME365_TLS_KEY_FILE}" || die 'Cannot decrypt customer TLS private key'
     chmod 600 "$WORKDIR/decrypted-private-key"
     install -m 600 -o root -g root "$WORKDIR/decrypted-private-key" "$CERT_DIR/privkey.pem"
 fi
 if [[ ! -e "$CERT_DIR/fullchain.pem" ]]; then
-    cat "$WORKDIR/customer/tls/${TIME365_TLS_CERT_FILE}" "$WORKDIR/customer/tls/ca-chain.crt" > "$WORKDIR/customer-fullchain.pem"
+    cat "$WORKDIR/customer/tls/${TIME365_TLS_CERT_FILE}" "$WORKDIR/customer/tls/${TIME365_TLS_CHAIN_FILE}" > "$WORKDIR/customer-fullchain.pem"
     install -m 644 -o root -g root "$WORKDIR/customer-fullchain.pem" "$CERT_DIR/fullchain.pem"
 fi
 fi # TLS_SOURCE=package; external TLS remains entirely customer-managed
-if [[ -z "$SECRETS_FILE" && ( "$MODE" == install || "$MODE" == upgrade || "$MODE" == reinstall || "$MODE" == db-install || "$CUSTOMER" == "moh-test" ) ]]; then
+if [[ -z "$SECRETS_FILE" && ( "$MODE" == install || "$MODE" == upgrade || "$MODE" == reinstall || "$MODE" == db-install || "$RC3_NEEDS_SECRETS" == true ) ]]; then
     age --decrypt -i "$AGE_IDENTITY" -o "$WORKDIR/decrypted-secrets.env" "$BUNDLE/secrets.env.age" || die 'Cannot decrypt customer secrets'
     chmod 600 "$WORKDIR/decrypted-secrets.env"
     SECRETS_FILE="$WORKDIR/decrypted-secrets.env"
@@ -388,7 +378,7 @@ fi
 
 # Pass the resolved file to the generic installer after optional age decryption.
 # This covers both --secrets-file and encrypted customer bundles.
-if [[ "$MODE" == install || "$MODE" == upgrade || "$MODE" == reinstall || "$MODE" == db-install || "$CUSTOMER" == "moh-test" ]]; then
+if [[ "$MODE" == install || "$MODE" == upgrade || "$MODE" == reinstall || "$MODE" == db-install || "$RC3_NEEDS_SECRETS" == true ]]; then
     [[ -n "$SECRETS_FILE" && -f "$SECRETS_FILE" && ! -L "$SECRETS_FILE" ]] \
         || die 'Missing resolved customer secrets file'
     export TIME365_INPUT_SECRETS_FILE="$SECRETS_FILE"
@@ -426,12 +416,11 @@ export DOCKER_CONFIG TIME365_EPHEMERAL_DOCKER_CONFIG=1
 # Database installer only uses these paths when DB_RESTORE_AUTO=true.
 export TIME365_CUSTOMER_ROOT="$WORKDIR/customer"
 export TIME365_AGE_IDENTITY="$AGE_IDENTITY"
-# TIME365_RC3_AUTO_DOCKER_MOH_DISPATCH_V1
-# The regular installer already calls ensure_docker(); MOH's direct Python
-# entrypoint bypasses it. Provision missing packages here for MOH only.
+# Adapter prerequisite handling is selected by deployment capability.
+# Standard Compose provisions its own install dependencies.
 # Preflight exits above this point and never installs Docker.
-ensure_moh_docker_prerequisites() {
-    [[ "$CUSTOMER" == 'moh-test' ]] || return 0
+ensure_adapter_docker_prerequisites() {
+    [[ "$RC3_DEPLOYMENT_DRIVER" == encrypted-app-api ]] || return 0
     case "$MODE" in
         install|upgrade|db-install|db-restore|moh-start) ;;
         *) return 0 ;;
@@ -441,6 +430,7 @@ ensure_moh_docker_prerequisites() {
         log 'Docker Engine and Compose already available; skipping installation'
         return 0
     fi
+    [[ "$MODE" != upgrade ]] || die 'Docker/Compose must already exist for an upgrade; refusing host installation'
     [[ -r /etc/os-release ]] || die 'Cannot determine OS for Docker provisioning'
     # shellcheck disable=SC1091
     . /etc/os-release
@@ -476,18 +466,16 @@ ensure_moh_docker_prerequisites() {
     docker info >/dev/null 2>&1 || die 'Docker daemon unavailable after installation'
     log 'Docker Engine and Compose are ready'
 }
-ensure_moh_docker_prerequisites
+ensure_adapter_docker_prerequisites
 log "Deploying customer '$CUSTOMER' from two scoped repositories."
 args=("$PROFILE" "$MODE")
 if [[ "$INTERACTIVE" == true && ( "$MODE" == install || "$MODE" == upgrade || "$MODE" == reinstall ) ]]; then args+=(--interactive); fi
-if [[ "$CUSTOMER" == 'moh-test' ]]; then
-    [[ -f "$INSTALLER/addons/moh-test/rc3-entrypoint.py" && ! -L "$INSTALLER/addons/moh-test/rc3-entrypoint.py" ]] \
-        || die 'Private installer missing MOH RC3 entrypoint; release incomplete'
-    moh_args=(--mode "$MODE" --profile "$PROFILE")
-    # TIME365_MOH_GUIDED_INSTALL_V1
-    if [[ "$INTERACTIVE" == true && ( "$MODE" == install || "$MODE" == upgrade ) ]]; then moh_args+=(--interactive); fi
-    python3 "$INSTALLER/addons/moh-test/rc3-entrypoint.py" "${moh_args[@]}"
+if [[ "$RC3_DEPLOYMENT_DRIVER" == encrypted-app-api ]]; then
+    adapter_args=(exec-adapter --installer-root "$INSTALLER" --profile "$PROFILE" \
+        --mode "$MODE" --environment "$ENVIRONMENT")
+    if [[ "$INTERACTIVE" == true && ( "$MODE" == install || "$MODE" == upgrade ) ]]; then adapter_args+=(--interactive); fi
+    python3 "$INSTALLER/scripts/rc3-profile-contract.py" "${adapter_args[@]}"
 else
-    "$INSTALLER/install.sh" "${args[@]}"
+    bash "$INSTALLER/install.sh" "${args[@]}"
 fi
 log 'Completed customer-isolated deployment.'

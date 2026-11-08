@@ -11,6 +11,8 @@ CUSTOMER_REF='main'
 ENVIRONMENT='production'
 GITHUB_TOKEN_FILE=''
 MODE='install'
+PFX_PATH=''
+TLS_ACTIVATE=false
 INTERACTIVE=false
 PREFLIGHT_ONLY=false
 SECRETS_FILE=''
@@ -28,6 +30,8 @@ Usage:
     [--environment NAME] (default: production; profiles select capabilities)
     [--github-token-file /root/time365/github-readonly.token]
     [--secrets-file /root/time365/CUSTOMER/secrets.env] [--interactive]
+    [--mode check-tls|reload-tls|rollback-check|rollback|import-tls|rollback-tls]
+    [--pfx /absolute/path/customer.pfx] [--activate] (import-tls only)
 
 Auth:
   Public bootstrap: no token.
@@ -60,6 +64,8 @@ while (($#)); do
         --age-identity) (($# >= 2)) || die '--age-identity requires a path'; AGE_IDENTITY="$2"; shift 2 ;;
         --secrets-file) (($# >= 2)) || die '--secrets-file requires a path'; SECRETS_FILE="$2"; shift 2 ;;
         --mode) (($# >= 2)) || die '--mode requires a value'; MODE="$2"; shift 2 ;;
+        --pfx) (($# >= 2)) || die '--pfx requires an absolute file path'; PFX_PATH="$2"; shift 2 ;;
+        --activate) TLS_ACTIVATE=true; shift ;;
         --interactive) INTERACTIVE=true; shift ;;
         --preflight-only) PREFLIGHT_ONLY=true; shift ;;
         -h|--help) usage; exit 0 ;;
@@ -71,9 +77,17 @@ done
 # verified customer profile contract, including guarded rollback.
 RC3_SPECIAL_MODE="$MODE"
 case "$MODE" in
-    check-tls|reload-tls|rollback-check|rollback) MODE=verify ;;
+    check-tls|reload-tls|rollback-check|rollback|import-tls|rollback-tls) MODE=verify ;;
 esac
-[[ "$CUSTOMER" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{1,47}$ ]] || die 'Invalid/missing --customer'
+# TIME365_RC3_TLS_IMPORT_V1
+if [[ "$RC3_SPECIAL_MODE" == import-tls ]]; then
+    [[ "$PFX_PATH" == /* && -n "$PFX_PATH" ]] || die 'import-tls requires --pfx ABSOLUTE_PATH'
+    [[ "$PREFLIGHT_ONLY" == false ]] || die 'import-tls does not support --preflight-only; omit --activate to stage only'
+else
+    [[ -z "$PFX_PATH" && "$TLS_ACTIVATE" == false ]] || die '--pfx/--activate only valid with --mode import-tls'
+fi
+[[ "$RC3_SPECIAL_MODE" != rollback-tls || "$PREFLIGHT_ONLY" == false ]] || die 'rollback-tls cannot run as --preflight-only'
+[[ "$CUSTOMER" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{1,47}$ ]] || die 'Invalid/missing --customer' 
 # Explicit environment; do not silently fall back to another customer profile.
 # TIME365_RC3_GENERIC_PROFILES_V3
 [[ "$ENVIRONMENT" =~ ^[a-z][a-z0-9-]{0,31}$ ]] || die 'Invalid environment name'
@@ -276,17 +290,29 @@ validate_external_tls() {
 }
 if [[ "$TLS_SOURCE" == server ]]; then
     command -v openssl >/dev/null 2>&1 || die 'OpenSSL required for server-managed TLS'
-    validate_external_tls
+    # Import validates the PFX first; old PEM files may be expired or absent.
+    if [[ "${RC3_SPECIAL_MODE:-}" != import-tls && "${RC3_SPECIAL_MODE:-}" != rollback-tls ]]; then validate_external_tls; fi
 fi
 
 # TIME365_RC3_OPERATOR_DISPATCH_V1
 # This runs only after private repositories, key vault, selected customer
 # profile, source hashes, and profile contract have all been checked.
-if [[ "${RC3_SPECIAL_MODE:-}" == check-tls || "${RC3_SPECIAL_MODE:-}" == reload-tls || "${RC3_SPECIAL_MODE:-}" == rollback-check || "${RC3_SPECIAL_MODE:-}" == rollback ]]; then
+if [[ "${RC3_SPECIAL_MODE:-}" == check-tls || "${RC3_SPECIAL_MODE:-}" == reload-tls || "${RC3_SPECIAL_MODE:-}" == rollback-check || "${RC3_SPECIAL_MODE:-}" == rollback || "${RC3_SPECIAL_MODE:-}" == import-tls || "${RC3_SPECIAL_MODE:-}" == rollback-tls ]]; then
     _rc3_op="$RC3_SPECIAL_MODE"
     _rc3_args=("$_rc3_op" --profile "$PROFILE" --environment "$ENVIRONMENT")
     if [[ "$_rc3_op" == rollback-check ]]; then
         _rc3_args=(rollback --profile "$PROFILE" --environment "$ENVIRONMENT" --preflight-only)
+    fi
+    if [[ "$_rc3_op" == import-tls || "$_rc3_op" == rollback-tls ]]; then
+        [[ "$TLS_SOURCE" == server ]] || die 'PFX management requires TLS_SOURCE=server'
+        [[ -f "$INSTALLER/scripts/rc3-tls-import.py" && ! -L "$INSTALLER/scripts/rc3-tls-import.py" ]] \
+            || die 'Shared installer missing verified PFX import operator'
+        if [[ "$_rc3_op" == import-tls ]]; then
+            _rc3_args+=(--pfx "$PFX_PATH")
+            if [[ "$TLS_ACTIVATE" == true ]]; then _rc3_args+=(--activate); fi
+        fi
+        python3 "$INSTALLER/scripts/rc3-tls-import.py" "${_rc3_args[@]}"
+        exit $?
     fi
     [[ -f "$INSTALLER/scripts/rc3-ops.py" && ! -L "$INSTALLER/scripts/rc3-ops.py" ]] \
         || die 'Shared installer does not contain RC3 operations helper'

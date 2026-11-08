@@ -66,6 +66,13 @@ while (($#)); do
         *) die "Unknown parameter: $1" ;;
     esac
 done
+# TIME365_RC3_OPERATOR_MODES_V1
+# Route TLS inspection/reload and rollback-check through the existing
+# verified customer profile contract, including guarded rollback.
+RC3_SPECIAL_MODE="$MODE"
+case "$MODE" in
+    check-tls|reload-tls|rollback-check|rollback) MODE=verify ;;
+esac
 [[ "$CUSTOMER" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{1,47}$ ]] || die 'Invalid/missing --customer'
 # Explicit environment; do not silently fall back to another customer profile.
 # TIME365_RC3_GENERIC_PROFILES_V3
@@ -270,6 +277,21 @@ validate_external_tls() {
 if [[ "$TLS_SOURCE" == server ]]; then
     command -v openssl >/dev/null 2>&1 || die 'OpenSSL required for server-managed TLS'
     validate_external_tls
+fi
+
+# TIME365_RC3_OPERATOR_DISPATCH_V1
+# This runs only after private repositories, key vault, selected customer
+# profile, source hashes, and profile contract have all been checked.
+if [[ "${RC3_SPECIAL_MODE:-}" == check-tls || "${RC3_SPECIAL_MODE:-}" == reload-tls || "${RC3_SPECIAL_MODE:-}" == rollback-check || "${RC3_SPECIAL_MODE:-}" == rollback ]]; then
+    _rc3_op="$RC3_SPECIAL_MODE"
+    _rc3_args=("$_rc3_op" --profile "$PROFILE" --environment "$ENVIRONMENT")
+    if [[ "$_rc3_op" == rollback-check ]]; then
+        _rc3_args=(rollback --profile "$PROFILE" --environment "$ENVIRONMENT" --preflight-only)
+    fi
+    [[ -f "$INSTALLER/scripts/rc3-ops.py" && ! -L "$INSTALLER/scripts/rc3-ops.py" ]] \
+        || die 'Shared installer does not contain RC3 operations helper'
+    python3 "$INSTALLER/scripts/rc3-ops.py" "${_rc3_args[@]}"
+    exit $?
 fi
 
 find "$INSTALLER" -type f -name '*.sh' -exec chmod 700 {} +
